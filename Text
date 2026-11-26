@@ -1,0 +1,67 @@
+import bpy, socket, json, threading, queue
+
+HOST, PORT = "127.0.0.1", 5555
+NAME = "RadarTarget"
+
+# Stop any previous run
+if "_radar_stop" in globals():
+    _radar_stop.set()
+    try:
+        _radar_srv.close()
+    except Exception:
+        pass
+
+# Create the sphere once
+obj = bpy.data.objects.get(NAME)
+if obj is None:
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.1, location=(0, 0, 0))
+    obj = bpy.context.active_object
+    obj.name = NAME
+
+q = queue.Queue()
+_radar_stop = threading.Event()
+
+def reader(conn):
+    buf = b""
+    while not _radar_stop.is_set():
+        data = conn.recv(4096)
+        if not data:
+            break
+        buf += data
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try:
+                q.put(json.loads(line))
+            except ValueError:
+                pass
+
+def server():
+    global _radar_srv
+    _radar_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _radar_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _radar_srv.bind((HOST, PORT))
+    _radar_srv.listen(1)
+    while not _radar_stop.is_set():
+        try:
+            conn, _ = _radar_srv.accept()
+        except OSError:
+            break
+        threading.Thread(target=reader, args=(conn,), daemon=True).start()
+
+threading.Thread(target=server, daemon=True).start()
+
+def apply():
+    latest = None
+    while True:
+        try:
+            latest = q.get_nowait()
+        except queue.Empty:
+            break
+    if latest is not None:
+        obj.location = (latest["x"], latest["y"], latest["z"])
+    if _radar_stop.is_set():
+        return None
+    return 0.05  # check again in 50 ms
+
+bpy.app.timers.register(apply, first_interval=0.05)
+print("Listening on", HOST, PORT)
